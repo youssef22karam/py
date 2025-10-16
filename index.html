@@ -534,6 +534,22 @@
       return low;
     }
 
+    // Calculate required width using explicit source dimensions (for quizzes)
+    function calculateRequiredWidthFor(requiredBytes, baseWidth, baseHeight) {
+      if (requiredBytes <= 0) return DEFAULT_WIDTH;
+      if (!baseWidth || !baseHeight) return DEFAULT_WIDTH;
+      const aspectRatio = baseHeight / baseWidth;
+      let low = DEFAULT_WIDTH, high = MAX_WIDTH;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        const midHeight = Math.round(mid * aspectRatio);
+        const cap = calculateImageCapacity(mid, midHeight);
+        if (cap >= requiredBytes) high = mid; else low = mid + 1;
+      }
+      if (low > MAX_WIDTH) return -1;
+      return low;
+    }
+
     // Encode panel elements
     const encodeFileInput = document.getElementById('encode-file');
     const encodeButton = document.getElementById('encode-button');
@@ -762,62 +778,70 @@
     const decodeButton = document.getElementById('decode-button');
     const decodePasswordWrap = document.getElementById('decode-password-wrap');
 
-    decodeFileInput.addEventListener('change', (e) => {
+    function analyzeDecodeFile(file) {
       const status = document.getElementById('decode-status');
       const resultDiv = document.getElementById('decode-result');
       const previewDiv = document.getElementById('decode-preview');
       const pwInput = document.getElementById('decode-password');
-      if (e.target.files.length > 0) {
-        decodeFile = e.target.files[0];
-        document.getElementById('decode-file-label').textContent = `${decodeFile.name}`;
-        showLoader(status); resultDiv.hidden = true; decodePasswordWrap.hidden = true; decodeButton.disabled = true;
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-          previewDiv.hidden = false; previewDiv.innerHTML = `<img src="${ev.target.result}" alt="Encoded preview">`;
-          try {
-            const img = new Image(); img.src = ev.target.result; await new Promise(r => img.onload = r);
-            const imageData = getCanvasData(img);
-            const { data, width, height } = imageData;
-            const blocksH = Math.floor(height / 8), blocksW = Math.floor(width / 8);
-            const yChannel = Array.from({ length: height }, () => Array(width).fill(0));
-            for (let y = 0; y < height; y++) {
-              for (let x = 0; x < width; x++) {
-                const i = (y * width + x) * 4; const c = rgbToYcbcr(data[i], data[i+1], data[i+2]); yChannel[y][x] = c.y;
-              }
+      if (!file) return;
+      decodeFile = file;
+      document.getElementById('decode-file-label').textContent = `${decodeFile.name}`;
+      showLoader(status); resultDiv.hidden = true; decodePasswordWrap.hidden = true; decodeButton.disabled = true;
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        previewDiv.hidden = false; previewDiv.innerHTML = `<img src="${ev.target.result}" alt="Encoded preview">`;
+        try {
+          const img = new Image(); img.src = ev.target.result; await new Promise(r => img.onload = r);
+          const imageData = getCanvasData(img);
+          const { data, width, height } = imageData;
+          const blocksH = Math.floor(height / 8), blocksW = Math.floor(width / 8);
+          const yChannel = Array.from({ length: height }, () => Array(width).fill(0));
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const i = (y * width + x) * 4; const c = rgbToYcbcr(data[i], data[i+1], data[i+2]); yChannel[y][x] = c.y;
             }
-            extractedBits = '';
-            const positions = [[2,3],[3,2],[1,4],[4,1]];
-            for (let by = 0; by < blocksH; by++) {
-              for (let bx = 0; bx < blocksW; bx++) {
-                const block = yChannel.slice(by*8, (by+1)*8).map(row => row.slice(bx*8, (bx+1)*8));
-                const dctBlock = dct2(block);
-                for (const pos of positions) {
-                  const coef = dctBlock[pos[0]][pos[1]];
-                  const q = Math.round(coef / QUANTIZATION_FACTOR);
-                  extractedBits += (Math.abs(q) % 2).toString();
-                }
-              }
-            }
-            const headerHamming = extractedBits.slice(0, 112);
-            let headerBinary = '';
-            for (let i = 0; i < headerHamming.length; i += 7) headerBinary += decodeHamming(headerHamming.slice(i, i+7).split(''));
-            const headerBytes = [];
-            for (let i = 0; i < headerBinary.length; i += 8) headerBytes.push(parseInt(headerBinary.slice(i, i+8), 2));
-            const magic = headerBytes.slice(0, 4);
-            const isPw = magic.every((b, i) => b === MAGIC_BYTES_PW[i]);
-            const isPlain = magic.every((b, i) => b === MAGIC_BYTES[i]);
-            const valid = isPw || isPlain;
-            if (valid) {
-              decodePasswordWrap.hidden = !isPw; status.innerHTML = ''; decodeButton.disabled = false; pwInput.value = '';
-            } else {
-              decodePasswordWrap.hidden = true; decodeButton.disabled = true;
-              showStatus(status, 'warning', 'No valid embedded message found.');
-            }
-          } catch (err) {
-            showStatus(status, 'error', `Error: ${err.message}`);
           }
-        };
-        reader.readAsDataURL(decodeFile);
+          extractedBits = '';
+          const positions = [[2,3],[3,2],[1,4],[4,1]];
+          for (let by = 0; by < blocksH; by++) {
+            for (let bx = 0; bx < blocksW; bx++) {
+              const block = yChannel.slice(by*8, (by+1)*8).map(row => row.slice(bx*8, (bx+1)*8));
+              const dctBlock = dct2(block);
+              for (const pos of positions) {
+                const coef = dctBlock[pos[0]][pos[1]];
+                const q = Math.round(coef / QUANTIZATION_FACTOR);
+                extractedBits += (Math.abs(q) % 2).toString();
+              }
+            }
+          }
+          const headerHamming = extractedBits.slice(0, 112);
+          let headerBinary = '';
+          for (let i = 0; i < headerHamming.length; i += 7) headerBinary += decodeHamming(headerHamming.slice(i, i+7).split(''));
+          const headerBytes = [];
+          for (let i = 0; i < headerBinary.length; i += 8) headerBytes.push(parseInt(headerBinary.slice(i, i+8), 2));
+          const magic = headerBytes.slice(0, 4);
+          const isPw = magic.every((b, i) => b === MAGIC_BYTES_PW[i]);
+          const isPlain = magic.every((b, i) => b === MAGIC_BYTES[i]);
+          const valid = isPw || isPlain;
+          if (valid) {
+            decodePasswordWrap.hidden = !isPw; status.innerHTML = ''; decodeButton.disabled = false; pwInput.value = '';
+          } else {
+            decodePasswordWrap.hidden = true; decodeButton.disabled = true;
+            showStatus(status, 'warning', 'No valid embedded message found.');
+          }
+        } catch (err) {
+          showStatus(status, 'error', `Error: ${err.message}`);
+        }
+      };
+      reader.readAsDataURL(decodeFile);
+    }
+
+    decodeFileInput.addEventListener('change', (e) => {
+      const status = document.getElementById('decode-status');
+      const resultDiv = document.getElementById('decode-result');
+      const previewDiv = document.getElementById('decode-preview');
+      if (e.target.files.length > 0) {
+        analyzeDecodeFile(e.target.files[0]);
       } else {
         decodeFile = null; extractedBits = null;
         document.getElementById('decode-file-label').textContent = 'PNG or JPG';
@@ -1279,17 +1303,21 @@
     });
 
     // Drag-and-drop for three zones
-    function bindDropzone(role, inputEl, onFile) {
+    function bindDropzone(role, inputEl, onFiles) {
       const dz = document.querySelector(`.dropzone[data-role="${role}"]`);
       const enter = (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add('dragover'); };
       const leave = (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('dragover'); };
-      const drop = (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('dragover'); const f = e.dataTransfer.files?.[0]; if (f) { inputEl.files = e.dataTransfer.files; onFile(); } };
+      const drop = (e) => {
+        e.preventDefault(); e.stopPropagation(); dz.classList.remove('dragover');
+        const files = e.dataTransfer.files;
+        if (files && files.length) { onFiles(files); }
+      };
       dz.addEventListener('dragenter', enter); dz.addEventListener('dragover', enter); dz.addEventListener('dragleave', leave); dz.addEventListener('drop', drop);
       dz.addEventListener('click', () => inputEl.click());
     }
-    bindDropzone('drop-encode', encodeFileInput, async () => { encodeFile = encodeFileInput.files[0]; document.getElementById('encode-file-label').textContent = encodeFile?.name || 'PNG or JPG'; await handleImageLoad(); });
-    bindDropzone('drop-decode', decodeFileInput, () => { decodeFileInput.dispatchEvent(new Event('change')); });
-    bindDropzone('drop-quiz', quizesFileInput, async () => { quizesFile = quizesFileInput.files[0]; document.getElementById('quizes-file-label').textContent = quizesFile?.name || 'PNG or JPG'; await handleQuizesImageLoad(); });
+    bindDropzone('drop-encode', encodeFileInput, async (files) => { encodeFile = files[0]; document.getElementById('encode-file-label').textContent = encodeFile?.name || 'PNG or JPG'; await handleImageLoad(); });
+    bindDropzone('drop-decode', decodeFileInput, (files) => { analyzeDecodeFile(files[0]); });
+    bindDropzone('drop-quiz', quizesFileInput, async (files) => { quizesFile = files[0]; document.getElementById('quizes-file-label').textContent = quizesFile?.name || 'PNG or JPG'; await handleQuizesImageLoad(); });
   </script>
 </body>
 </html>
